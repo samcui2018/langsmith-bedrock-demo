@@ -11,32 +11,43 @@ def build_finance_graph(model, sql_tools, kb_tools):
     monthly_summary_tool = sql_tools.get_monthly_summary_tool()
     search_kb_tool = kb_tools.search_knowledge_base_tool()
 
+    def format_history(history):
+        if not history:
+            return "No prior conversation."
+
+        return "\n".join(
+            f"{msg['role']}: {msg['content']}"
+            for msg in history[-6:]
+        )
+
     def router_node(state: FinanceState):
         question = state["question"].lower()
+        history_text = format_history(state.get("conversation_history", [])).lower()
+        combined_text = f"{history_text}\n{question}"
 
-        if "top merchant" in question or "merchant" in question:
+        if "top merchant" in combined_text or "merchant" in combined_text:
             route = "top_merchants"
 
         elif (
-            "policy" in question
-            or "document" in question
-            or "knowledge base" in question
-            or "explain" in question
-            or "definition" in question
+            "policy" in combined_text
+            or "document" in combined_text
+            or "knowledge base" in combined_text
+            or "explain" in combined_text
+            or "definition" in combined_text
         ):
             route = "knowledge_base"
 
         elif (
-            "why" in question
-            or "reason" in question
-            or "increase" in question
-            or "decrease" in question
-            or "changed" in question
-            or "trend" in question
+            "why" in combined_text
+            or "reason" in combined_text
+            or "increase" in combined_text
+            or "decrease" in combined_text
+            or "changed" in combined_text
+            or "trend" in combined_text
         ):
             route = "combined_analysis"
 
-        elif "summary" in question or "summarize" in question or "spending" in question:
+        elif "summary" in combined_text or "summarize" in combined_text or "spending" in combined_text:
             route = "monthly_summary"
 
         else:
@@ -164,10 +175,14 @@ def build_finance_graph(model, sql_tools, kb_tools):
         }
 
     def final_response_node(state: FinanceState):
+        history_text = format_history(state.get("conversation_history", []))
         prompt = f"""
         You are a financial analytics assistant.
 
-        User question:
+        Conversation history:
+        {history_text}
+
+        Current user question:
         {state["question"]}
 
         Business ID:
@@ -189,6 +204,8 @@ def build_finance_graph(model, sql_tools, kb_tools):
         {state["tool_result"]}
 
         Write a concise business-friendly answer.
+        Use the conversation history only for context.
+        If the current question is a follow-up, connect it to the previous turn.
         If the question was blocked by security, politely explain that the request cannot be completed.
         If the tool returned no data, say that clearly.
         """

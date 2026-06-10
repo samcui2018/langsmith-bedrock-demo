@@ -1,11 +1,16 @@
 from typing import TypedDict, Literal
 
+class ChatMessage(TypedDict):
+    role: str
+    content: str
 
 class FinanceState(TypedDict):
     question: str
     business_id: str
     month: str
 
+    conversation_history: list[ChatMessage]
+    
     route: Literal[
         "top_merchants",
         "monthly_summary",
