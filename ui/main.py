@@ -17,7 +17,7 @@ async def login():
     global access_token
 
     payload = {
-        "username": username_input.value,
+        "email": username_input.value,
         "password": password_input.value,
     }
 
@@ -29,36 +29,11 @@ async def login():
 
         access_token = data["access_token"]
         login_status.text = f"Logged in as {data['name']}"
-
+        print (username_input.value, password_input.value)
         await load_businesses()
 
     except Exception as ex:
         login_status.text = f"Login failed: {str(ex)}"
-
-ui.label("FinIntel Chat").classes("text-h4")
-ui.label("LangGraph + SQL + Bedrock KB + LangSmith").classes("text-subtitle2")
-
-username_input = ui.input("Username", value="demo").classes("w-full")
-password_input = ui.input("Password", value="demo123", password=True).classes("w-full")
-login_status = ui.label("")
-
-ui.button("Login", on_click=login)
-
-business_select = ui.select(
-    label="Business",
-    options={},
-    ).classes("w-full")
-
-month_input = ui.input(
-    label="Month",
-    value="2026-03",
-).classes("w-full")
-
-chat_area = ui.column().classes("w-full gap-2")
-
-question_input = ui.input(
-    placeholder="Ask about merchants, spending, policies, or trends..."
-).classes("w-full")
 
 
 def render_messages():
@@ -177,7 +152,7 @@ async def load_businesses():
         data = response.json()
 
     options = {
-        b["business_id"]: b["name"]
+        b["business_id"]: b["business_name"]
         for b in data["businesses"]
     }
 
@@ -187,6 +162,34 @@ async def load_businesses():
         business_select.value = next(iter(options.keys()))
 
     business_select.update()
+
+
+# UI code using NiceGUI
+ui.column().classes("w-full items-center gap-1")
+ui.label("FinIntel Chat").classes("text-h4")
+ui.label("LangGraph + SQL + Bedrock KB + LangSmith").classes("text-subtitle2")
+
+username_input = ui.input("Email", value="demo@example.com").classes("w-full")
+password_input = ui.input("Password", value="demo123", password=True).classes("w-full")
+login_status = ui.label("")
+
+ui.button("Login", on_click=login)
+
+business_select = ui.select(
+    label="Business",
+    options={},
+    ).classes("w-full")
+
+month_input = ui.input(
+    label="Month",
+    value="2026-03",
+).classes("w-full")
+
+chat_area = ui.column().classes("w-full gap-2")
+
+question_input = ui.input(
+    placeholder="Ask about merchants, spending, policies, or trends..."
+).classes("w-full")
 
 
 with ui.row().classes("w-full"):

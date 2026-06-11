@@ -16,7 +16,7 @@ class AuthService:
         self.users = {
             "demo": {
                 "user_id": "demo-user",
-                "username": "demo",
+                "email": "demo@example.com",
                 "name": "Demo User",
                 # password: demo123
                 "hashed_password": self.password_context.hash("demo123"),
@@ -50,7 +50,7 @@ class AuthService:
 
         payload = {
             "sub": user["user_id"],
-            "username": user["username"],
+            "email": user["email"],
             "exp": expires_at,
         }
 

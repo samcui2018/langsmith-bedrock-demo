@@ -1,4 +1,6 @@
 from dotenv import load_dotenv
+
+from services.auth_sql_service import AuthSqlService
 load_dotenv()
 
 from fastapi import FastAPI
@@ -14,12 +16,12 @@ from graphs.finance_graph import build_finance_graph
 import json
 from fastapi.responses import StreamingResponse
 from fastapi import HTTPException
-from services.auth_service import AuthService
+# from services.auth_service import AuthsQLService
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 app = FastAPI(title="FinIntel Agent API")
-auth_service = AuthService()
+auth_service = AuthSqlService(Settings.SQL_CONN_STR)
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -41,7 +43,7 @@ class ChatResponse(BaseModel):
     tool_result: str
 
 class LoginRequest(BaseModel):
-    username: str
+    email: str
     password: str
 
 
@@ -49,8 +51,9 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     name: str
+    email: str
 
-auth_service = AuthService()
+auth_service = AuthSqlService(Settings.SQL_CONN_STR)
 bearer_scheme = HTTPBearer()
 
 model = ChatOpenAI(model="gpt-4o-mini")
@@ -100,22 +103,27 @@ def root():
 @app.post("/auth/login", response_model=LoginResponse)
 def login(request: LoginRequest):
     user = auth_service.authenticate_user(
-        request.username,
+        request.email,
         request.password,
     )
-
+    print("LOGIN USER:", user)
     if not user:
         raise HTTPException(
             status_code=401,
-            detail="Invalid username or password.",
+            detail="Invalid email or password.",
         )
 
     token = auth_service.create_access_token(user)
 
-    return LoginResponse(
+    response = LoginResponse(
         access_token=token,
         name=user["name"],
+        email=user["email"]
     )
+
+    print("LOGIN RESPONSE:", response)
+
+    return response
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest, user: dict = Depends(get_current_user)):
@@ -205,11 +213,12 @@ def chat_stream(request: ChatRequest, user: dict = Depends(get_current_user)):
 @app.get("/me/businesses")
 def get_my_businesses(user = Depends(get_current_user)):
     # user = auth_service.get_current_user()
-
+    businesses = auth_service.get_user_businesses(user["user_id"])
     return {
         "user_id": user["user_id"],
+        "email": user["email"],
         "name": user["name"],
-        "businesses": user["businesses"],
+        "businesses": businesses,
     }
 
 def build_initial_state(request: ChatRequest):
