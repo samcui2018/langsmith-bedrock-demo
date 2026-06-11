@@ -20,8 +20,10 @@ from fastapi import HTTPException
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-app = FastAPI(title="FinIntel Agent API")
-auth_service = AuthSqlService(Settings.SQL_CONN_STR)
+from typing import Optional
+from services.chat_service import ChatService
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -42,6 +44,22 @@ class ChatResponse(BaseModel):
     governance_result: str
     tool_result: str
 
+class CreateChatSessionRequest(BaseModel):
+    business_id: str
+    title: Optional[str] = None
+
+
+class CreateChatSessionResponse(BaseModel):
+    chat_session_id: str
+
+
+class ChatRequest(BaseModel):
+    question: str
+    business_id: str
+    month: str
+    chat_session_id: Optional[str] = None
+    conversation_history: list[ChatMessage] = Field(default_factory=list)
+
 class LoginRequest(BaseModel):
     email: str
     password: str
@@ -53,7 +71,13 @@ class LoginResponse(BaseModel):
     name: str
     email: str
 
+# Initialize FastAPI app
+app = FastAPI(title="FinIntel Agent API")
+
+# Initialize services
 auth_service = AuthSqlService(Settings.SQL_CONN_STR)
+chat_service = ChatService(Settings.SQL_CONN_STR)
+
 bearer_scheme = HTTPBearer()
 
 model = ChatOpenAI(model="gpt-4o-mini")
@@ -67,12 +91,14 @@ kb_tools = BedrockKbTools(
     aws_secret_access_key=Settings.AWS_SECRET_ACCESS_KEY
 )
 
+# Build the main graph with the model and tools
 graph_app = build_finance_graph(
     model=model,
     sql_tools=sql_tools,
     kb_tools=kb_tools,
 )
 
+# Dependency to get current user from JWT token
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ):
@@ -96,6 +122,41 @@ def get_current_user(
 
     return user
 
+# Helper functions
+def build_initial_state(request: ChatRequest):
+    return {
+        "question": request.question,
+        "business_id": request.business_id,
+        "month": request.month,
+        "conversation_history": [
+            msg.model_dump() for msg in request.conversation_history
+        ],
+
+        "route": "unknown",
+
+        "security_result": "",
+        "security_passed": False,
+
+        "tool_result": "",
+
+        "governance_result": "",
+        "governance_passed": False,
+
+        "final_answer": "",
+    }
+def validate_business_access(user: dict, business_id: str):
+    # user = auth_service.get_current_user()
+
+    if not auth_service.user_can_access_business(
+        user_id=user["user_id"],
+        business_id=business_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorized to access this business.",
+        )
+
+# API Endpoints
 @app.get("/")
 def root():
     return {"message": "FinIntel Agent API is running"}
@@ -141,40 +202,82 @@ def chat(request: ChatRequest, user: dict = Depends(get_current_user)):
     )
 
 @app.post("/chat/stream")
-def chat_stream(request: ChatRequest, user: dict = Depends(get_current_user)):
+def chat_stream(
+    request: ChatRequest,
+    user=Depends(get_current_user),
+    ):
     validate_business_access(user, request.business_id)
+
+    chat_session_id = request.chat_session_id
+
+    if not chat_session_id:
+        chat_session_id = chat_service.create_session(
+            user_id=user["user_id"],
+            business_id=request.business_id,
+            title=request.question[:80],
+        )
+
+    existing_messages = chat_service.get_messages(
+        chat_session_id=chat_session_id,
+        user_id=user["user_id"],
+    )
+
+    if existing_messages is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Chat session not found.",
+        )
+
+    chat_service.add_message(
+        chat_session_id=chat_session_id,
+        role="user",
+        content=request.question,
+    )
+
+    request.conversation_history = [
+        ChatMessage(role=m["role"], content=m["content"])
+        for m in existing_messages[-10:]
+    ]
+
     def event_generator():
+        final_answer = ""
+
         yield json.dumps({
-            "type": "status",
-            "message": "Starting FinIntel graph..."
+            "type": "session",
+            "chat_session_id": chat_session_id,
         }) + "\n"
 
-        state = build_initial_state(request)
+        yield json.dumps({
+            "type": "status",
+            "message": "Starting FinIntel graph...",
+        }) + "\n"
 
         try:
+            state = build_initial_state(request)
+
             for event in graph_app.stream(state):
                 node_name = list(event.keys())[0]
                 node_output = event[node_name]
 
                 yield json.dumps({
                     "type": "status",
-                    "message": f"Completed node: {node_name}"
+                    "message": f"Completed node: {node_name}",
                 }) + "\n"
 
                 if node_name == "router":
                     yield json.dumps({
                         "type": "route",
-                        "route": node_output.get("route")
+                        "route": node_output.get("route"),
                     }) + "\n"
 
-                if node_name == "security":
+                elif node_name == "security":
                     yield json.dumps({
                         "type": "security",
                         "security_passed": node_output.get("security_passed"),
-                        "security_result": node_output.get("security_result")
+                        "security_result": node_output.get("security_result"),
                     }) + "\n"
 
-                if node_name in [
+                elif node_name in [
                     "top_merchants",
                     "monthly_summary",
                     "knowledge_base",
@@ -184,26 +287,35 @@ def chat_stream(request: ChatRequest, user: dict = Depends(get_current_user)):
                 ]:
                     yield json.dumps({
                         "type": "tool_result",
-                        "tool_result": node_output.get("tool_result")
+                        "tool_result": node_output.get("tool_result"),
                     }) + "\n"
 
-                if node_name == "governance":
+                elif node_name == "governance":
                     yield json.dumps({
                         "type": "governance",
                         "governance_passed": node_output.get("governance_passed"),
-                        "governance_result": node_output.get("governance_result")
+                        "governance_result": node_output.get("governance_result"),
                     }) + "\n"
 
-                if node_name == "final_response":
+                elif node_name == "final_response":
+                    final_answer = node_output.get("final_answer", "")
+
                     yield json.dumps({
                         "type": "final",
-                        "answer": node_output.get("final_answer")
+                        "answer": final_answer,
                     }) + "\n"
+
+            if final_answer:
+                chat_service.add_message(
+                    chat_session_id=chat_session_id,
+                    role="assistant",
+                    content=final_answer,
+                )
 
         except Exception as ex:
             yield json.dumps({
                 "type": "error",
-                "message": str(ex)
+                "message": str(ex),
             }) + "\n"
 
     return StreamingResponse(
@@ -221,35 +333,46 @@ def get_my_businesses(user = Depends(get_current_user)):
         "businesses": businesses,
     }
 
-def build_initial_state(request: ChatRequest):
-    return {
-        "question": request.question,
-        "business_id": request.business_id,
-        "month": request.month,
-        "conversation_history": [
-            msg.model_dump() for msg in request.conversation_history
-        ],
+@app.post("/chat-sessions", response_model=CreateChatSessionResponse)
+def create_chat_session(
+    request: CreateChatSessionRequest,
+    user=Depends(get_current_user),
+):
+    validate_business_access(user, request.business_id)
 
-        "route": "unknown",
-
-        "security_result": "",
-        "security_passed": False,
-
-        "tool_result": "",
-
-        "governance_result": "",
-        "governance_passed": False,
-
-        "final_answer": "",
-    }
-def validate_business_access(user: dict, business_id: str):
-    # user = auth_service.get_current_user()
-
-    if not auth_service.user_can_access_business(
+    session_id = chat_service.create_session(
         user_id=user["user_id"],
-        business_id=business_id,
-    ):
+        business_id=request.business_id,
+        title=request.title,
+    )
+
+    return CreateChatSessionResponse(chat_session_id=session_id)
+
+
+@app.get("/chat-sessions")
+def get_chat_sessions(user=Depends(get_current_user)):
+    return {
+        "sessions": chat_service.get_sessions(user["user_id"])
+    }
+
+
+@app.get("/chat-sessions/{chat_session_id}/messages")
+def get_chat_messages(
+    chat_session_id: str,
+    user=Depends(get_current_user),
+):
+    messages = chat_service.get_messages(
+        chat_session_id=chat_session_id,
+        user_id=user["user_id"],
+    )
+
+    if messages is None:
         raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to access this business.",
+            status_code=404,
+            detail="Chat session not found.",
         )
+
+    return {
+        "messages": messages
+    }
+

@@ -6,6 +6,8 @@ API_URL = "http://127.0.0.1:8000/chat"
 BUSINESSES_URL = "http://127.0.0.1:8000/me/businesses"
 LOGIN_URL = "http://127.0.0.1:8000/auth/login"
 CHAT_STREAM_URL = "http://127.0.0.1:8000/chat/stream"
+CHAT_SESSIONS_URL = "http://127.0.0.1:8000/chat-sessions"
+current_chat_session_id = None
 
 access_token = None
 
@@ -29,8 +31,9 @@ async def login():
 
         access_token = data["access_token"]
         login_status.text = f"Logged in as {data['name']}"
-        print (username_input.value, password_input.value)
+        # print (username_input.value, password_input.value)
         await load_businesses()
+        await load_sessions()
 
     except Exception as ex:
         login_status.text = f"Login failed: {str(ex)}"
@@ -39,14 +42,15 @@ async def login():
 def render_messages():
     chat_area.clear()
 
-    for msg in messages:
-        with chat_area:
-            with ui.card().classes("w-full"):
-                ui.label(msg["role"]).classes("text-bold")
-                ui.markdown(msg["content"])
-
+    with chat_area:
+        for m in messages:
+            if m["role"] == "user":
+                ui.chat_message(m["content"], name="You", sent=True)
+            else:
+                ui.chat_message(m["content"], name="FinIntel")
 
 async def ask_agent():
+    global current_chat_session_id
     if not access_token:
         messages.append({
             "role": "assistant",
@@ -80,6 +84,7 @@ async def ask_agent():
         "question": question,
         "business_id": business_select.value,
         "month": month_input.value,
+        "chat_session_id": current_chat_session_id,
         "conversation_history": history_for_api,
     }
 
@@ -105,6 +110,10 @@ async def ask_agent():
                         continue
 
                     event = json.loads(line)
+
+                    if event["type"] == "session":
+                        current_chat_session_id = event["chat_session_id"]
+                        await load_sessions()
 
                     if event["type"] == "status":
                         partial_text += f"\n\n⏳ {event['message']}"
@@ -163,6 +172,83 @@ async def load_businesses():
 
     business_select.update()
 
+async def create_new_session():
+    global current_chat_session_id, messages
+
+    if not access_token or not business_select.value:
+        return
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    payload = {
+        "business_id": business_select.value,
+        "title": "New chat",
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            CHAT_SESSIONS_URL,
+            json=payload,
+            headers=headers,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    current_chat_session_id = data["chat_session_id"]
+    messages = []
+    render_messages()
+    await load_sessions()
+
+
+async def load_sessions():
+    if not access_token:
+        return
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            CHAT_SESSIONS_URL,
+            headers=headers,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    options = {
+        s["chat_session_id"]: s["title"] or s["chat_session_id"]
+        for s in data["sessions"]
+    }
+
+    session_select.options = options
+    session_select.update()
+
+
+async def load_session_messages():
+    global current_chat_session_id, messages
+
+    if not access_token or not session_select.value:
+        return
+
+    current_chat_session_id = session_select.value
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{CHAT_SESSIONS_URL}/{current_chat_session_id}/messages",
+            headers=headers,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    messages = [
+        {
+            "role": m["role"],
+            "content": m["content"],
+        }
+        for m in data["messages"]
+    ]
+
+    render_messages()
 
 # UI code using NiceGUI
 ui.column().classes("w-full items-center gap-1")
@@ -184,6 +270,17 @@ month_input = ui.input(
     label="Month",
     value="2026-03",
 ).classes("w-full")
+
+# Chat session selector
+session_select = ui.select(
+    label="Chat Session",
+    options={},
+).classes("w-full")
+
+# Load messages when a session is selected
+session_select.on_value_change(load_session_messages)
+ui.button("New Chat", on_click=create_new_session)
+
 
 chat_area = ui.column().classes("w-full gap-2")
 
